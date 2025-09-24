@@ -1,0 +1,78 @@
+{
+  "name": "MuxBot",
+  "description": "Professional Telegram mux bot for video processing with terminal access and media tools",
+  "repository": "https://github.com/proavipatil/TheMuxBot",
+  "logo": "https://telegra.ph/file/4d2f3f544feaef527fa9a.png",
+  "keywords": ["telegram", "bot", "video", "mux", "media", "processing"],
+  "stack": "heroku-22",
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID from my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API Hash from my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Your Bot Token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram User ID (owner of the bot)",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "MongoDB connection URI (use MongoDB Atlas free tier)",
+      "required": true
+    },
+    "TELEGRAPH_TOKEN": {
+      "description": "Telegraph API token for media info reports",
+      "required": false
+    },
+    "G_DRIVE_CLIENT_ID": {
+      "description": "Google Drive Client ID for file uploads",
+      "required": false
+    },
+    "G_DRIVE_CLIENT_SECRET": {
+      "description": "Google Drive Client Secret for file uploads",
+      "required": false
+    },
+    "G_DRIVE_AUTH_TOKEN_DATA": {
+      "description": "Google Drive Auth Token Data for file uploads",
+      "required": false
+    },
+    "G_DRIVE_PARENT_ID": {
+      "description": "Google Drive Parent Folder ID for uploads",
+      "required": false
+    },
+    "G_DRIVE_INDEX_LINK": {
+      "description": "Google Drive Index Link for direct access",
+      "required": false
+    },
+    "LOG_CHANNEL_ID": {
+      "description": "Telegram Channel ID for logging uploads/downloads",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    },
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-google-chrome"
+    },
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-chromedriver"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "scripts": {
+    "postdeploy": "echo 'Bot deployed successfully. Worker dyno will start automatically.'"
+  }
+}

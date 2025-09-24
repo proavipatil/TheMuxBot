@@ -67,7 +67,7 @@ cd TheBot
 
 2. Copy environment file:
 ```bash
-cp .env.example .env
+cp .env .env
 ```
 
 3. Edit `.env` file with your configuration:

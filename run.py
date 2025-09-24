@@ -13,7 +13,7 @@ def main():
     # Check if .env file exists
     if not os.path.exists('.env'):
         print("❌ .env file not found!")
-        print("📝 Please copy .env.example to .env and configure it")
+        print("📝 Please copy .env to .env and configure it")
         return
     
     # Load environment variables from .env file
