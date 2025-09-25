@@ -37,32 +37,152 @@ except ImportError:
 from pyrogram.types.messages_and_media.message import Str
 from pyrogram import enums, filters, Client
 from pyrogram.types import Message
+from pyrogram.errors import MessageNotModified, MessageIdInvalid
 from bot.config import Config
 
 
+class MessageWrapper:
+    """Wrapper to make Pyrogram Message behave like Userge Message"""
+    def __init__(self, message: Message):
+        self._message = message
+        self.flags = {}
+        self.input_str = ""
+        self.filtered_input_str = ""
+        self.reply_to_message = message.reply_to_message
+        self.chat = message.chat
+        self.text = message.text
+        self._parse_input()
+        self._parse_flags()
+
+    def _parse_input(self):
+        if self._message.text and len(self._message.text.split()) > 1:
+            self.input_str = " ".join(self._message.text.split()[1:])
+            self.filtered_input_str = self.input_str
+
+    def _parse_flags(self):
+        if self.input_str:
+            parts = self.input_str.split()
+            filtered_parts = []
+            for part in parts:
+                if part.startswith('-'):
+                    flag = part[1:]
+                    if flag.startswith('c') and len(flag) > 1 and flag[1:].isdigit():
+                        self.flags['-c'] = flag[1:]
+                    else:
+                        self.flags[f'-{flag}'] = ''
+                else:
+                    filtered_parts.append(part)
+            self.filtered_input_str = " ".join(filtered_parts)
+
+    async def edit(self, text, parse_mode=None):
+        try:
+            return await self._message.edit_text(text, parse_mode=parse_mode)
+        except (MessageNotModified, MessageIdInvalid):
+            return await self._message.reply(text, parse_mode=parse_mode)
+
+    async def err(self, text):
+        return await self.edit(f"**ERROR**: `{text}`")
+
+    async def edit_or_send_as_file(self, text, as_raw=False, parse_mode=None, filename="output.txt", caption=""):
+        if len(text) > 4096 or as_raw:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(text)
+            await self._message.reply_document(filename, caption=caption)
+            os.remove(filename)
+        else:
+            await self.edit(text, parse_mode=parse_mode)
+
+    async def canceled(self, reply=False):
+        if reply:
+            await self._message.reply("`Process Canceled!`")
+        else:
+            await self.edit("`Process Canceled!`")
+
+    async def delete(self):
+        return await self._message.delete()
+
+    def cancel_callback(self, callback):
+        class CancelContext:
+            def __init__(self, cb):
+                self.callback = cb
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+        return CancelContext(callback)
+
+
 @Client.on_message(filters.command("exec") & filters.user(Config.OWNER_ID))
-@input_checker
 async def exec_command(client, message):
-    await exec_(client, message)
+    if not message.text or len(message.text.split()) < 2:
+        help_text = """**EXEC**:
+
+**Header**: run commands in exec
+**Flags**: 
+  `-r`: raw text when send as file
+**Usage**: `/exec [commands]`
+**Examples**: `/exec echo "Userge"`"""
+        await message.reply(help_text)
+        return
+    
+    msg = MessageWrapper(message)
+    await exec_(msg)
 
 
 @Client.on_message(filters.command("eval") & filters.user(Config.OWNER_ID))
-@input_checker
 async def eval_command(client, message):
-    await eval_(client, message)
+    if not message.text or len(message.text.split()) < 2:
+        help_text = """**EVAL**:
+
+**Header**: run python code line | lines
+**Flags**:
+  `-r`: raw text when send as file
+  `-s`: silent mode (hide input code)
+  `-p`: run in a private session
+  `-n`: spawn new main session and run
+  `-l`: list all running eval tasks
+  `-c`: cancel specific running eval task
+  `-ca`: cancel all running eval tasks
+**Usage**: `/eval [flag] [code lines OR reply to .txt | .py file]`
+**Examples**:
+  `/eval print('Userge')`
+  `/eval -s print('Userge')`
+  `/eval 5 + 6`
+  `/eval -s 5 + 6`
+  `/eval -p x = 'private_value'`
+  `/eval -n y = 'new_value'`
+  `/eval -c2`
+  `/eval -ca`
+  `/eval -l`"""
+        await message.reply(help_text)
+        return
+    
+    msg = MessageWrapper(message)
+    await eval_(msg)
 
 
 @Client.on_message(filters.command("term") & filters.user(Config.OWNER_ID))
-@input_checker
 async def term_command(client, message):
-    await term_(client, message)
+    if not message.text or len(message.text.split()) < 2:
+        help_text = """**TERM**:
+
+**Header**: run commands in shell (terminal)
+**Flags**:
+  `-r`: raw text when send as file
+**Usage**: `/term [commands]`
+**Examples**: `/term echo "Userge"`"""
+        await message.reply(help_text)
+        return
+    
+    msg = MessageWrapper(message)
+    await term_(msg)
 
 
-def input_checker(func: Callable[[Any, Any], Awaitable[Any]]):
-    async def wrapper(client, message) -> None:
+def input_checker(func: Callable[[Any], Awaitable[Any]]):
+    async def wrapper(message) -> None:
         replied = message.reply_to_message
 
-        if not message.text or len(message.text.split()) < 2:
+        if not message.input_str:
             if (func.__name__ == "eval_"
                     and replied and replied.document
                     and replied.document.file_name.endswith(('.txt', '.py'))
@@ -72,23 +192,26 @@ def input_checker(func: Callable[[Any, Any], Awaitable[Any]]):
                 async with aiofiles.open(dl_loc) as jv:
                     message.text += " " + await jv.read()
                 os.remove(dl_loc)
+                message.flags.update({'file': True})
             else:
-                await message.reply("No Command Found!")
+                await message.err("No Command Found!")
                 return
 
-        cmd = " ".join(message.text.split()[1:])
+        cmd = message.input_str
 
         if "config.env" in cmd:
-            await message.edit_text("`That's a dangerous operation! Not Permitted!`")
+            await message.edit("`That's a dangerous operation! Not Permitted!`")
             return
-        await func(client, message)
+        await func(message)
     return wrapper
 
 
-async def exec_(client, message):
+@input_checker
+async def exec_(message):
     """ run commands in exec """
-    await message.edit_text("`Executing exec ...`")
-    cmd = " ".join(message.text.split()[1:])
+    await message.edit("`Executing exec ...`")
+    cmd = message.filtered_input_str
+    as_raw = '-r' in message.flags
 
     try:
         process = await asyncio.create_subprocess_shell(
@@ -104,35 +227,78 @@ async def exec_(client, message):
         pid = process.pid
         
     except Exception as t_e:
-        await message.edit_text(f"**ERROR**: `{str(t_e)}`")
+        await message.err(str(t_e))
         return
 
-    output = f"**EXEC**:\n\n\
-__Command:__\n`{cmd}`\n__PID:__\n`{pid}`\n__RETURN:__\n`{ret}`\n\n\
-**stderr:**\n`{err or 'no error'}`\n\n**stdout:**\n``{out or 'no output'}`` "
-    
-    if len(output) > 4096:
-        with open("exec.txt", "w") as f:
-            f.write(output)
-        await message.reply_document("exec.txt", caption=cmd)
-        os.remove("exec.txt")
-    else:
-        await message.edit_text(output, parse_mode=enums.ParseMode.MARKDOWN)
+    output = f"**EXEC**:\n\n__Command:__\n`{cmd}`\n__PID:__\n`{pid}`\n__RETURN:__\n`{ret}`\n\n**stderr:**\n`{err or 'no error'}`\n\n**stdout:**\n``{out or 'no output'}`` "
+    await message.edit_or_send_as_file(text=output,
+                                       as_raw=as_raw,
+                                       parse_mode=enums.ParseMode.MARKDOWN,
+                                       filename="exec.txt",
+                                       caption=cmd)
 
 
 _KEY = '_OLD'
 _EVAL_TASKS: Dict[asyncio.Future, str] = {}
 
 
-async def eval_(client, message):
+@input_checker
+async def eval_(message):
     """ run python code """
     for t in tuple(_EVAL_TASKS):
         if t.done():
             del _EVAL_TASKS[t]
 
-    cmd = " ".join(message.text.split()[1:]) if len(message.text.split()) > 1 else ""
+    flags = message.flags
+
+    if flags:
+        if '-l' in flags:
+            if _EVAL_TASKS:
+                out = "**Eval Tasks**\n\n"
+                i = 0
+                for c in _EVAL_TASKS.values():
+                    out += f"**{i}** - `{c}`\n"
+                    i += 1
+                out += f"\nuse `/eval -c[id]` to Cancel"
+                await message.edit(out)
+            else:
+                await message.edit("No running eval tasks !")
+                await asyncio.sleep(5)
+                await message.delete()
+            return
+
+        size = len(_EVAL_TASKS)
+
+        if ('-c' in flags or '-ca' in flags) and size == 0:
+            await message.edit("No running eval tasks !")
+            await asyncio.sleep(5)
+            await message.delete()
+            return
+
+        if '-ca' in flags:
+            for t in _EVAL_TASKS:
+                t.cancel()
+            await message.edit(f"Canceled all running eval tasks [{size}] !")
+            await asyncio.sleep(5)
+            await message.delete()
+            return
+
+        if '-c' in flags:
+            t_id = int(flags.get('-c', -1))
+            if t_id < 0 or t_id >= size:
+                await message.edit(f"Invalid eval task id [{t_id}] !")
+                await asyncio.sleep(5)
+                await message.delete()
+                return
+            tuple(_EVAL_TASKS)[t_id].cancel()
+            await message.edit(f"Canceled eval task [{t_id}] !")
+            await asyncio.sleep(5)
+            await message.delete()
+            return
+
+    cmd = message.filtered_input_str
     if not cmd:
-        await message.edit_text("Unable to Parse Input!")
+        await message.err("Unable to Parse Input!")
         return
 
     msg = message
@@ -142,30 +308,43 @@ async def eval_(client, message):
             and str(replied.text.html).startswith("<b>></b> <pre>")):
         msg = replied
 
-    await msg.edit_text("`Executing eval ...`", parse_mode=enums.ParseMode.MARKDOWN)
+    await msg.edit("`Executing eval ...`", parse_mode=enums.ParseMode.MARKDOWN)
+
+    is_file = replied and replied.document and flags.get("file")
+    as_raw = '-r' in flags
+    silent_mode = '-s' in flags
+    if '-n' in flags:
+        context_type = _ContextType.NEW
+    elif '-p' in flags:
+        context_type = _ContextType.PRIVATE
+    else:
+        context_type = _ContextType.GLOBAL
 
     async def _callback(output: Optional[str], errored: bool):
         final = ""
-        final += "**>**" + f"```python\n{cmd}```" + "\n\n"
+        if not silent_mode:
+            final += "**>**" + (replied.link if is_file else f"```python\n{cmd}```") + "\n\n"
         if isinstance(output, str):
             output = output.strip()
             if output == '':
                 output = None
         if output is not None:
             final += f"**>>** ```python\n{output}```"
-        if final:
-            if len(final) > 4096:
-                with open("eval.txt", "w") as f:
-                    f.write(final)
-                await message.reply_document("eval.txt", caption=cmd)
-            else:
-                await msg.edit_text(final,
-                                   parse_mode=enums.ParseMode.MARKDOWN,
-                                   disable_web_page_preview=True)
+        if errored and message.chat.type in (
+                enums.ChatType.GROUP,
+                enums.ChatType.SUPERGROUP,
+                enums.ChatType.CHANNEL):
+            await msg.edit(f"**Error occurred, check logs**")
+        elif final:
+            await msg.edit_or_send_as_file(text=final,
+                                           as_raw=as_raw,
+                                           parse_mode=enums.ParseMode.MARKDOWN,
+                                           filename="eval.txt",
+                                           caption=cmd)
         else:
             await msg.delete()
 
-    _g, _l = _context(_ContextType.GLOBAL, message=message, replied=message.reply_to_message)
+    _g, _l = _context(context_type, message=message, replied=message.reply_to_message)
     l_d = {}
     try:
         # nosec pylint: disable=W0122
@@ -185,28 +364,31 @@ async def eval_(client, message):
     hint = cmd.split('\n')[0]
     _EVAL_TASKS[future] = hint[:25] + "..." if len(hint) > 25 else hint
 
-    try:
-        await future
-    except asyncio.CancelledError:
-        await msg.edit_text("**EVAL Process Canceled!**")
-    finally:
-        _EVAL_TASKS.pop(future, None)
+    with msg.cancel_callback(future.cancel):
+        try:
+            await future
+        except asyncio.CancelledError:
+            await asyncio.gather(msg.canceled())
+        finally:
+            _EVAL_TASKS.pop(future, None)
 
 
-async def term_(client, message):
+@input_checker
+async def term_(message):
     """ run commands in shell (terminal with live update) """
-    await message.edit_text("`Executing terminal ...`")
-    cmd = " ".join(message.text.split()[1:])
+    await message.edit("`Executing terminal ...`")
+    cmd = message.filtered_input_str
+    as_raw = '-r' in message.flags
 
     try:
         parsed_cmd = parse_py_template(cmd, message)
     except Exception as e:  # pylint: disable=broad-except
-        await message.edit_text(f"**ERROR**: {str(e)}")
+        await message.err(str(e))
         return
     try:
         t_obj = await Term.execute(parsed_cmd)  # type: Term
     except Exception as t_e:  # pylint: disable=broad-except
-        await message.edit_text(f"**ERROR**: {str(t_e)}")
+        await message.err(str(t_e))
         return
 
     cur_user = getuser()
@@ -215,22 +397,21 @@ async def term_(client, message):
     prefix = f"<b>{cur_user}:~#</b>" if uid == 0 else f"<b>{cur_user}:~$</b>"
     output = f"{prefix} <pre>{cmd}</pre>\n"
 
-    await t_obj.init()
-    while not t_obj.finished:
-        await message.edit_text(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
-        await t_obj.wait(2)
-    if t_obj.cancelled:
-        await message.edit_text("Process Canceled!", parse_mode=enums.ParseMode.HTML)
-        return
+    with message.cancel_callback(t_obj.cancel):
+        await t_obj.init()
+        while not t_obj.finished:
+            try:
+                await message.edit(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
+            except (MessageNotModified, MessageIdInvalid):
+                pass
+            await t_obj.wait(10)  # Increased timeout to avoid flood limits
+        if t_obj.cancelled:
+            await message.canceled(reply=True)
+            return
 
     out_data = f"{output}<pre>{t_obj.output}</pre>\n{prefix}"
-    
-    if len(out_data) > 4096:
-        with open("term.txt", "w") as f:
-            f.write(out_data)
-        await message.reply_document("term.txt", caption=cmd)
-    else:
-        await message.edit_text(out_data, parse_mode=enums.ParseMode.HTML)
+    await message.edit_or_send_as_file(
+        out_data, as_raw=as_raw, parse_mode=enums.ParseMode.HTML, filename="term.txt", caption=cmd)
 
 
 def parse_py_template(cmd: str, msg):
@@ -406,7 +587,6 @@ class Term:
     async def _worker(self) -> None:
         if self._cancelled or self._finished:
             return
-        # Fixed for Python 3.11 compatibility
         await asyncio.wait([asyncio.create_task(self._read_stdout()), asyncio.create_task(self._read_stderr())])
         await self._process.wait()
         self._finish()
