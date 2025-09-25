@@ -90,12 +90,17 @@ class MessageWrapper:
             parts = self.input_str.split()
             filtered_parts = []
             for part in parts:
-                if part.startswith('-'):
+                if part.startswith('-') and len(part) > 1 and part[1].isalpha():
+                    # Only treat as flag if it's a single letter after dash for our internal flags
                     flag = part[1:]
-                    if flag.startswith('c') and len(flag) > 1 and flag[1:].isdigit():
-                        self.flags['-c'] = flag[1:]
+                    if flag in ['r', 's', 'p', 'n', 'l', 'ca'] or (flag.startswith('c') and flag[1:].isdigit()):
+                        if flag.startswith('c') and len(flag) > 1 and flag[1:].isdigit():
+                            self.flags['-c'] = flag[1:]
+                        else:
+                            self.flags[f'-{flag}'] = ''
                     else:
-                        self.flags[f'-{flag}'] = ''
+                        # Keep command flags like -V, -la, etc.
+                        filtered_parts.append(part)
                 else:
                     filtered_parts.append(part)
             self.filtered_input_str = " ".join(filtered_parts)
@@ -208,24 +213,7 @@ async def term_command(client, message):
     await term_(msg)
 
 
-@Client.on_message(filters.command(["ls", "pwd", "cd"]) & filters.user(Config.OWNER_ID))
-async def shell_commands(client, message):
-    """Handle shell commands directly"""
-    command = message.command[0].lower()
-    args = " ".join(message.command[1:]) if len(message.command) > 1 else ""
-    
-    # Convert to term command
-    if command == "cd" and args:
-        shell_cmd = f"cd {args} && pwd"
-    else:
-        shell_cmd = f"{command} {args}".strip()
-    
-    # Create a fake term message
-    fake_text = f"/term {shell_cmd}"
-    message.text = fake_text
-    
-    msg = MessageWrapper(message)
-    await term_(msg)
+
 
 
 def input_checker(func: Callable[[Any], Awaitable[Any]]):
@@ -441,8 +429,8 @@ async def term_(message):
         await message.err(str(t_e))
         return
 
-    cur_user = getuser()
-    current_dir_name = basename(CURRENT_DIR) or CURRENT_DIR
+    cur_user = "root"
+    current_dir_name = basename(CURRENT_DIR) or "~"
 
     prefix = f"<b>{cur_user}:{current_dir_name}#</b>"
     output = f"{prefix} <pre>{cmd}</pre>\n"
