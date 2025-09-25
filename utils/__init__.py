@@ -50,3 +50,27 @@ def truncate_text(text: str, max_length: int = 4000) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length-10] + "\n...truncated"
+
+def create_settings_keyboard() -> InlineKeyboardMarkup:
+    """Create settings inline keyboard"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📁 paths", callback_data="settings_paths"),
+            InlineKeyboardButton("⚙️ config", callback_data="settings_config")
+        ],
+        [
+            InlineKeyboardButton("📊 stats", callback_data="settings_stats"),
+            InlineKeyboardButton("👥 auth", callback_data="settings_auth")
+        ],
+        [InlineKeyboardButton("❌ close", callback_data="settings_close")]
+    ])
+
+def create_auth_keyboard() -> InlineKeyboardMarkup:
+    """Create auth management inline keyboard"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 users", callback_data="auth_users"),
+            InlineKeyboardButton("👥 groups", callback_data="auth_groups")
+        ],
+        [InlineKeyboardButton("🔙 back", callback_data="settings_main")]
+    ])
