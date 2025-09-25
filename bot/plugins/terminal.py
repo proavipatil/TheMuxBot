@@ -15,11 +15,15 @@ from getpass import getuser
 from shutil import which
 from typing import Awaitable, Any, Callable, Dict, Optional, Tuple, Iterable
 
+import aiofiles
+
 try:
     from os import geteuid, setsid, getpgid, killpg
     from signal import SIGKILL
 except ImportError:
+    # pylint: disable=ungrouped-imports
     from os import kill as killpg
+    # pylint: disable=ungrouped-imports
     from signal import CTRL_C_EVENT as SIGKILL
 
     def geteuid() -> int:
@@ -30,23 +34,62 @@ except ImportError:
 
     setsid = None
 
-from pyrogram import enums, filters
+from pyrogram.types.messages_and_media.message import Str
+from pyrogram import enums, filters, Client
+from pyrogram.types import Message
 from bot.config import Config
 
-async def exec_command(client, message):
-    """ run commands in exec """
-    if not message.text or len(message.text.split()) < 2:
-        await message.reply_text("No Command Found!")
-        return
 
+@Client.on_message(filters.command("exec") & filters.user(Config.OWNER_ID))
+@input_checker
+async def exec_command(client, message):
+    await exec_(client, message)
+
+
+@Client.on_message(filters.command("eval") & filters.user(Config.OWNER_ID))
+@input_checker
+async def eval_command(client, message):
+    await eval_(client, message)
+
+
+@Client.on_message(filters.command("term") & filters.user(Config.OWNER_ID))
+@input_checker
+async def term_command(client, message):
+    await term_(client, message)
+
+
+def input_checker(func: Callable[[Any, Any], Awaitable[Any]]):
+    async def wrapper(client, message) -> None:
+        replied = message.reply_to_message
+
+        if not message.text or len(message.text.split()) < 2:
+            if (func.__name__ == "eval_"
+                    and replied and replied.document
+                    and replied.document.file_name.endswith(('.txt', '.py'))
+                    and replied.document.file_size <= 2097152):
+
+                dl_loc = await replied.download()
+                async with aiofiles.open(dl_loc) as jv:
+                    message.text += " " + await jv.read()
+                os.remove(dl_loc)
+            else:
+                await message.reply("No Command Found!")
+                return
+
+        cmd = " ".join(message.text.split()[1:])
+
+        if "config.env" in cmd:
+            await message.edit_text("`That's a dangerous operation! Not Permitted!`")
+            return
+        await func(client, message)
+    return wrapper
+
+
+async def exec_(client, message):
+    """ run commands in exec """
+    await message.edit_text("`Executing exec ...`")
     cmd = " ".join(message.text.split()[1:])
 
-    if "config.env" in cmd:
-        await message.reply_text("`That's a dangerous operation! Not Permitted!`")
-        return
-    """ run commands in exec """
-    msg = await message.reply_text("`Executing exec ...`")
-    
     try:
         process = await asyncio.create_subprocess_shell(
             cmd,
@@ -61,66 +104,84 @@ async def exec_command(client, message):
         pid = process.pid
         
     except Exception as t_e:
-        await msg.edit_text(f"Error: {str(t_e)}")
+        await message.edit_text(f"**ERROR**: `{str(t_e)}`")
         return
 
-    output = f"**EXEC**:\n\n__Command:__\n`{cmd}`\n__PID:__\n`{pid}`\n__RETURN:__\n`{ret}`\n\n**stderr:**\n`{err or 'no error'}`\n\n**stdout:**\n`{out or 'no output'}`"
+    output = f"**EXEC**:\n\n\
+__Command:__\n`{cmd}`\n__PID:__\n`{pid}`\n__RETURN:__\n`{ret}`\n\n\
+**stderr:**\n`{err or 'no error'}`\n\n**stdout:**\n``{out or 'no output'}`` "
     
     if len(output) > 4096:
         with open("exec.txt", "w") as f:
             f.write(output)
         await message.reply_document("exec.txt", caption=cmd)
         os.remove("exec.txt")
-        await msg.delete()
     else:
-        await msg.edit_text(output, parse_mode=enums.ParseMode.MARKDOWN)
+        await message.edit_text(output, parse_mode=enums.ParseMode.MARKDOWN)
+
 
 _KEY = '_OLD'
 _EVAL_TASKS: Dict[asyncio.Future, str] = {}
 
-async def eval_command(client, message):
+
+async def eval_(client, message):
     """ run python code """
     for t in tuple(_EVAL_TASKS):
         if t.done():
             del _EVAL_TASKS[t]
 
-    if not message.text or len(message.text.split()) < 2:
-        await message.reply_text("Unable to Parse Input!")
+    cmd = " ".join(message.text.split()[1:]) if len(message.text.split()) > 1 else ""
+    if not cmd:
+        await message.edit_text("Unable to Parse Input!")
         return
 
-    cmd = " ".join(message.text.split()[1:])
-    msg = await message.reply_text("`Executing eval ...`")
+    msg = message
+    replied = message.reply_to_message
+    if (replied and replied.from_user
+            and replied.from_user.is_self and isinstance(replied.text, Str)
+            and str(replied.text.html).startswith("<b>></b> <pre>")):
+        msg = replied
+
+    await msg.edit_text("`Executing eval ...`", parse_mode=enums.ParseMode.MARKDOWN)
 
     async def _callback(output: Optional[str], errored: bool):
-        final = f"**>** ```python\n{cmd}```\n\n"
+        final = ""
+        final += "**>**" + f"```python\n{cmd}```" + "\n\n"
         if isinstance(output, str):
             output = output.strip()
             if output == '':
                 output = None
         if output is not None:
             final += f"**>>** ```python\n{output}```"
-        
-        if len(final) > 4096:
-            with open("eval.txt", "w") as f:
-                f.write(final)
-            await message.reply_document("eval.txt", caption=cmd)
-            await msg.delete()
-        elif final:
-            await msg.edit_text(final, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        if final:
+            if len(final) > 4096:
+                with open("eval.txt", "w") as f:
+                    f.write(final)
+                await message.reply_document("eval.txt", caption=cmd)
+            else:
+                await msg.edit_text(final,
+                                   parse_mode=enums.ParseMode.MARKDOWN,
+                                   disable_web_page_preview=True)
         else:
             await msg.delete()
 
-    _g, _l = _context(_ContextType.GLOBAL, message=message)
+    _g, _l = _context(_ContextType.GLOBAL, message=message, replied=message.reply_to_message)
     l_d = {}
     try:
+        # nosec pylint: disable=W0122
         exec(_wrap_code(cmd, _l.keys()), _g, l_d)
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         _g[_KEY] = _l
         await _callback(traceback.format_exc(), True)
         return
 
     future = asyncio.get_running_loop().create_future()
-    asyncio.create_task(_run_coro_task(future, l_d['__aexec'](*_l.values()), _callback))
+    asyncio.create_task(
+        _run_coro(
+            future,
+            l_d['__aexec'](
+                *_l.values()),
+            _callback))
     hint = cmd.split('\n')[0]
     _EVAL_TASKS[future] = hint[:25] + "..." if len(hint) > 25 else hint
 
@@ -131,30 +192,21 @@ async def eval_command(client, message):
     finally:
         _EVAL_TASKS.pop(future, None)
 
-async def term_command(client, message):
-    """ run commands in shell (terminal with live update) """
-    if not message.text or len(message.text.split()) < 2:
-        await message.reply_text("No Command Found!")
-        return
 
+async def term_(client, message):
+    """ run commands in shell (terminal with live update) """
+    await message.edit_text("`Executing terminal ...`")
     cmd = " ".join(message.text.split()[1:])
 
-    if "config.env" in cmd:
-        await message.reply_text("`That's a dangerous operation! Not Permitted!`")
-        return
-    """ run commands in shell (terminal with live update) """
-    msg = await message.reply_text("`Executing terminal ...`")
-    
     try:
         parsed_cmd = parse_py_template(cmd, message)
-    except Exception as e:
-        await msg.edit_text(f"Error: {str(e)}")
+    except Exception as e:  # pylint: disable=broad-except
+        await message.edit_text(f"**ERROR**: {str(e)}")
         return
-    
     try:
-        t_obj = await Term.execute(parsed_cmd)
-    except Exception as t_e:
-        await msg.edit_text(f"Error: {str(t_e)}")
+        t_obj = await Term.execute(parsed_cmd)  # type: Term
+    except Exception as t_e:  # pylint: disable=broad-except
+        await message.edit_text(f"**ERROR**: {str(t_e)}")
         return
 
     cur_user = getuser()
@@ -165,14 +217,10 @@ async def term_command(client, message):
 
     await t_obj.init()
     while not t_obj.finished:
-        try:
-            await msg.edit_text(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
-        except:
-            pass
+        await message.edit_text(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
         await t_obj.wait(2)
-    
     if t_obj.cancelled:
-        await msg.edit_text("Process Canceled!")
+        await message.edit_text("Process Canceled!", parse_mode=enums.ParseMode.HTML)
         return
 
     out_data = f"{output}<pre>{t_obj.output}</pre>\n{prefix}"
@@ -181,21 +229,25 @@ async def term_command(client, message):
         with open("term.txt", "w") as f:
             f.write(out_data)
         await message.reply_document("term.txt", caption=cmd)
-        await msg.delete()
     else:
-        await msg.edit_text(out_data, parse_mode=enums.ParseMode.HTML)
+        await message.edit_text(out_data, parse_mode=enums.ParseMode.HTML)
+
 
 def parse_py_template(cmd: str, msg):
-    glo, loc = _context(_ContextType.PRIVATE, message=msg)
+    glo, loc = _context(_ContextType.PRIVATE, message=msg,
+                        replied=msg.reply_to_message)
 
     def replacer(mobj):
+        # nosec pylint: disable=W0123
         return shlex.quote(str(eval(mobj.expand(r"\1"), glo, loc)))
     return re.sub(r"{{(.+?)}}", replacer, cmd)
+
 
 class _ContextType(Enum):
     GLOBAL = 0
     PRIVATE = 1
     NEW = 2
+
 
 def _context(context_type: _ContextType, **kwargs) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if context_type == _ContextType.NEW:
@@ -212,6 +264,7 @@ def _context(context_type: _ContextType, **kwargs) -> Tuple[Dict[str, Any], Dict
     _l.update(kwargs)
     return _g, _l
 
+
 def _wrap_code(code: str, args: Iterable[str]) -> str:
     head = "async def __aexec(" + ', '.join(args) + "):\n try:\n  "
     tail = "\n finally: globals()['" + _KEY + "'] = locals()"
@@ -225,8 +278,9 @@ def _wrap_code(code: str, args: Iterable[str]) -> str:
         code = f"\n  return {code}"
     return head + code + tail
 
-async def _run_coro_task(future: asyncio.Future, coro: Awaitable[Any],
-                        callback: Callable[[str, bool], Awaitable[Any]]) -> None:
+
+async def _run_coro(future: asyncio.Future, coro: Awaitable[Any],
+              callback: Callable[[str, bool], Awaitable[Any]]) -> None:
     try:
         ret, exc = None, None
         with redirect() as out:
@@ -234,7 +288,7 @@ async def _run_coro_task(future: asyncio.Future, coro: Awaitable[Any],
                 ret = await coro
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception:  # pylint: disable=broad-except
                 exc = traceback.format_exc().strip()
             output = exc or out.getvalue()
             if ret is not None:
@@ -244,7 +298,9 @@ async def _run_coro_task(future: asyncio.Future, coro: Awaitable[Any],
         if not future.done():
             future.set_result(None)
 
+
 _PROXIES = {}
+
 
 class _Wrapper:
     def __init__(self, original):
@@ -257,10 +313,12 @@ class _Wrapper:
                 self._original),
             name)
 
+
 sys.stdout = _Wrapper(sys.stdout)
 sys.__stdout__ = _Wrapper(sys.__stdout__)
 sys.stderr = _Wrapper(sys.stderr)
 sys.__stderr__ = _Wrapper(sys.__stderr__)
+
 
 @contextmanager
 def redirect() -> io.StringIO:
@@ -272,6 +330,7 @@ def redirect() -> io.StringIO:
     finally:
         del _PROXIES[ident]
         source.close()
+
 
 class Term:
     """ live update term class """
@@ -347,6 +406,7 @@ class Term:
     async def _worker(self) -> None:
         if self._cancelled or self._finished:
             return
+        # Fixed for Python 3.11 compatibility
         await asyncio.wait([asyncio.create_task(self._read_stdout()), asyncio.create_task(self._read_stderr())])
         await self._process.wait()
         self._finish()
