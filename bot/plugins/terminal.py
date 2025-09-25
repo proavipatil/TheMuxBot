@@ -14,6 +14,9 @@ from enum import Enum
 from getpass import getuser
 from shutil import which
 from typing import Awaitable, Any, Callable, Dict, Optional, Tuple, Iterable
+from pathlib import Path
+from os.path import exists, isdir, isfile, basename, dirname, join
+from datetime import datetime
 
 import aiofiles
 
@@ -40,6 +43,27 @@ from pyrogram.types import Message
 from pyrogram.errors import MessageNotModified, MessageIdInvalid
 from bot.config import Config
 
+# Working directory management
+CURRENT_DIR = os.getcwd()
+
+def humanbytes(size: float) -> str:
+    """Convert bytes to human readable format"""
+    if not size:
+        return "0 B"
+    power = 1024
+    t_n = 0
+    power_dict = {0: '', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti', 5: 'Pi', 6: 'Ei', 7: 'Zi', 8: 'Yi'}
+    while size > power:
+        size /= power
+        t_n += 1
+    return f"{size:.2f} {power_dict[t_n]}B"
+
+def sort_file_name_key(file_name: str) -> tuple:
+    """Sort key for file names"""
+    if not isinstance(file_name, str):
+        file_name = str(file_name)
+    return tuple(file_name.lower())
+
 
 class MessageWrapper:
     """Wrapper to make Pyrogram Message behave like Userge Message"""
@@ -58,6 +82,8 @@ class MessageWrapper:
         if self._message.text and len(self._message.text.split()) > 1:
             self.input_str = " ".join(self._message.text.split()[1:])
             self.filtered_input_str = self.input_str
+        # Update text reference for modified messages
+        self.text = self._message.text
 
     def _parse_flags(self):
         if self.input_str:
@@ -170,9 +196,33 @@ async def term_command(client, message):
 **Flags**:
   `-r`: raw text when send as file
 **Usage**: `/term [commands]`
-**Examples**: `/term echo "Userge"`"""
+**Examples**: 
+  `/term ls -la`
+  `/term pwd`
+  `/term cd downloads && pwd`
+  `/term echo "Hello World"`"""
         await message.reply(help_text)
         return
+    
+    msg = MessageWrapper(message)
+    await term_(msg)
+
+
+@Client.on_message(filters.command(["ls", "pwd", "cd"]) & filters.user(Config.OWNER_ID))
+async def shell_commands(client, message):
+    """Handle shell commands directly"""
+    command = message.command[0].lower()
+    args = " ".join(message.command[1:]) if len(message.command) > 1 else ""
+    
+    # Convert to term command
+    if command == "cd" and args:
+        shell_cmd = f"cd {args} && pwd"
+    else:
+        shell_cmd = f"{command} {args}".strip()
+    
+    # Create a fake term message
+    fake_text = f"/term {shell_cmd}"
+    message.text = fake_text
     
     msg = MessageWrapper(message)
     await term_(msg)
@@ -376,6 +426,7 @@ async def eval_(message):
 @input_checker
 async def term_(message):
     """ run commands in shell (terminal with live update) """
+    global CURRENT_DIR
     cmd = message.filtered_input_str
     as_raw = '-r' in message.flags
 
@@ -392,8 +443,9 @@ async def term_(message):
 
     cur_user = getuser()
     uid = geteuid()
+    current_dir_name = basename(CURRENT_DIR) or CURRENT_DIR
 
-    prefix = f"<b>{cur_user}:~#</b>" if uid == 0 else f"<b>{cur_user}:~$</b>"
+    prefix = f"<b>{cur_user}:{current_dir_name}#</b>" if uid == 0 else f"<b>{cur_user}:{current_dir_name}$</b>"
     output = f"{prefix} <pre>{cmd}</pre>\n"
     
     # Track if we've made the first edit to avoid duplicate messages
@@ -415,6 +467,13 @@ async def term_(message):
         if t_obj.cancelled:
             await message.canceled(reply=True)
             return
+
+    # Handle directory changes from commands like cd
+    if cmd.strip().startswith('cd '):
+        try:
+            CURRENT_DIR = os.getcwd()
+        except:
+            pass
 
     out_data = f"{output}<pre>{t_obj.output}</pre>\n{prefix}"
     await message.edit_or_send_as_file(
@@ -576,9 +635,11 @@ class Term:
 
     @classmethod
     async def execute(cls, cmd: str) -> 'Term':
+        global CURRENT_DIR
         kwargs = dict(
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE,
+            cwd=CURRENT_DIR)  # Use current working directory
         if setsid:
             kwargs['preexec_fn'] = setsid
         if sh := which(os.environ.get("USERGE_SHELL", "bash")):
@@ -629,3 +690,5 @@ class Term:
         self._finished = True
         if not self._listener.done():
             self._listener.set_result(None)
+
+
