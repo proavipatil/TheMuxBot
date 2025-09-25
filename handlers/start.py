@@ -77,3 +77,16 @@ async def help_handler(client: Client, message: Message):
     )
     
     await message.reply_text(help_text, quote=True)
+
+@Client.on_message(filters.command("test") & filters.private)
+async def test_handler(client: Client, message: Message):
+    """Test handler without authorization"""
+    user_id = message.from_user.id
+    await message.reply_text(
+        f"🧪 **Test Response**\n\n"
+        f"Your ID: `{user_id}`\n"
+        f"Owner ID: `{Config.OWNER_ID}`\n"
+        f"Is Owner: `{user_id == Config.OWNER_ID}`\n"
+        f"Is Authorized: `{Config.is_authorized(user_id)}`",
+        quote=True
+    )

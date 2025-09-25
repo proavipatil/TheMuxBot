@@ -2,8 +2,13 @@
 
 import asyncio
 import logging
+import os
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.errors import RPCError
+
+# Load environment variables first
+load_dotenv()
 
 from config import Config, BOT_TOKEN, API_ID, API_HASH, WORKERS, AUTHORIZED_USERS, AUTHORIZED_GROUPS
 from database import db
@@ -51,8 +56,13 @@ class TheBot(Client):
             
             bot_info = await self.get_me()
             logger.info(f"Bot started successfully: @{bot_info.username}")
+            logger.info(f"Owner ID: {Config.OWNER_ID}")
             logger.info(f"Authorized users: {len(AUTHORIZED_USERS)}")
             logger.info(f"Authorized groups: {len(AUTHORIZED_GROUPS)}")
+            
+            # Test authorization for owner
+            is_owner_auth = Config.is_authorized(Config.OWNER_ID)
+            logger.info(f"Owner authorization test: {is_owner_auth}")
             
         except RPCError as e:
             if "API_ID" in str(e) or "API_HASH" in str(e):
@@ -74,17 +84,24 @@ class TheBot(Client):
 
 async def main():
     """Main function"""
+    print("Starting bot...")
+    
     # Validate configuration
     if not Config.validate():
         logger.error("Invalid configuration. Please check your environment variables.")
         return
     
+    print("Configuration validated successfully")
+    
     # Create bot instance
     bot = TheBot()
+    print("Bot instance created")
     
     try:
+        print("Attempting to start bot...")
         # Start the bot
         await bot.start()
+        print("Bot started successfully! Waiting for messages...")
         
         # Keep the bot running
         await asyncio.Event().wait()
