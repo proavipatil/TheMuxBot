@@ -376,7 +376,6 @@ async def eval_(message):
 @input_checker
 async def term_(message):
     """ run commands in shell (terminal with live update) """
-    await message.edit("`Executing terminal ...`")
     cmd = message.filtered_input_str
     as_raw = '-r' in message.flags
 
@@ -396,12 +395,20 @@ async def term_(message):
 
     prefix = f"<b>{cur_user}:~#</b>" if uid == 0 else f"<b>{cur_user}:~$</b>"
     output = f"{prefix} <pre>{cmd}</pre>\n"
+    
+    # Track if we've made the first edit to avoid duplicate messages
+    first_edit = True
 
     with message.cancel_callback(t_obj.cancel):
         await t_obj.init()
         while not t_obj.finished:
             try:
-                await message.edit(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
+                current_output = f"{output}<pre>{t_obj.line}</pre>"
+                if first_edit:
+                    await message.edit(current_output, parse_mode=enums.ParseMode.HTML)
+                    first_edit = False
+                else:
+                    await message.edit(current_output, parse_mode=enums.ParseMode.HTML)
             except (MessageNotModified, MessageIdInvalid):
                 pass
             await t_obj.wait(10)  # Increased timeout to avoid flood limits
