@@ -25,7 +25,7 @@ class Database:
             
     async def add_auth_user(self, user_id: int) -> bool:
         """Add authorized user"""
-        if not self.db:
+        if self.db is None:
             return False
         await self.db.auth_users.update_one(
             {"user_id": user_id},
@@ -36,21 +36,21 @@ class Database:
         
     async def remove_auth_user(self, user_id: int) -> bool:
         """Remove authorized user"""
-        if not self.db:
+        if self.db is None:
             return False
         result = await self.db.auth_users.delete_one({"user_id": user_id})
         return result.deleted_count > 0
         
     async def get_auth_users(self) -> List[int]:
         """Get all authorized users"""
-        if not self.db:
+        if self.db is None:
             return []
         cursor = self.db.auth_users.find({})
         return [doc["user_id"] async for doc in cursor]
         
     async def add_auth_group(self, group_id: int) -> bool:
         """Add authorized group"""
-        if not self.db:
+        if self.db is None:
             return False
         await self.db.auth_groups.update_one(
             {"group_id": group_id},
@@ -61,14 +61,14 @@ class Database:
         
     async def remove_auth_group(self, group_id: int) -> bool:
         """Remove authorized group"""
-        if not self.db:
+        if self.db is None:
             return False
         result = await self.db.auth_groups.delete_one({"group_id": group_id})
         return result.deleted_count > 0
         
     async def get_auth_groups(self) -> List[int]:
         """Get all authorized groups"""
-        if not self.db:
+        if self.db is None:
             return []
         cursor = self.db.auth_groups.find({})
         return [doc["group_id"] async for doc in cursor]
