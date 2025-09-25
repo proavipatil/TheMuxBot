@@ -14,7 +14,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 # Authorization
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 AUTHORIZED_USERS: List[int] = []
-AUTHORIZED_GROUPS: List[int] = []
+AUTHORIZED_GROUPS: List[int] = [-1001728622394]  # Default authorized group
 
 # Google Drive Configuration
 G_DRIVE_CLIENT_ID = os.environ.get("G_DRIVE_CLIENT_ID", "")
@@ -43,6 +43,11 @@ for path in [DOWNLOAD_PATH, TEMP_PATH, LOG_PATH]:
 
 class Config:
     """Configuration class"""
+    
+    OWNER_ID = OWNER_ID
+    COMMAND_TIMEOUT = COMMAND_TIMEOUT
+    MAX_FILE_SIZE = MAX_FILE_SIZE
+    WORKERS = WORKERS
     
     @staticmethod
     def validate() -> bool:
