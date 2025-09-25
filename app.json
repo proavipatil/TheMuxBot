@@ -1,0 +1,55 @@
+{
+  "name": "MuxBot",
+  "description": "Professional Telegram mux bot for video processing with terminal access and media tools",
+  "keywords": [
+    "telegram",
+    "bot",
+    "mux",
+    "video",
+    "ffmpeg",
+    "mkvtoolnix",
+    "media",
+    "processing"
+  ],
+  "repository": "https://github.com/proavipatil/TheMuxBot",
+  "website": "https://github.com/proavipatil/TheMuxBot",
+  "success_url": "https://t.me/MuxBotSupport",
+  "stack": "container",
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID from my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API Hash from my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Your Bot Token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram User ID (owner of the bot)",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "MongoDB connection URI (use MongoDB Atlas free tier)",
+      "required": false
+    },
+    "TELEGRAPH_TOKEN": {
+      "description": "Telegraph API token for media info reports (optional)",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

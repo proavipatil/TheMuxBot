@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  muxbot:
+    build: .
+    container_name: muxbot
+    restart: unless-stopped
+    environment:
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - OWNER_ID=${OWNER_ID}
+      - MONGO_URI=${MONGO_URI}
+      - TELEGRAPH_TOKEN=${TELEGRAPH_TOKEN}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./temp:/app/temp
+      - ./logs:/app/logs
+    depends_on:
+      - mongodb
+    networks:
+      - muxbot-network
+
+  mongodb:
+    image: mongo:7.0
+    container_name: muxbot-mongo
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_DATABASE=muxbot
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - muxbot-network
+
+volumes:
+  mongodb_data:
+
+networks:
+  muxbot-network:
+    driver: bridge
