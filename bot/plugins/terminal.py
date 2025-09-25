@@ -1,31 +1,281 @@
-"""
-Terminal command plugin
-"""
+""" run shell or python command(s) """
 
 import asyncio
-import logging
+import io
+import keyword
 import os
-import subprocess
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ParseMode
+import re
+import shlex
+import sys
+import threading
+import traceback
+from contextlib import contextmanager
+from enum import Enum
+from getpass import getuser
+from shutil import which
+from typing import Awaitable, Any, Callable, Dict, Optional, Tuple, Iterable
 
+try:
+    from os import geteuid, setsid, getpgid, killpg
+    from signal import SIGKILL
+except ImportError:
+    from os import kill as killpg
+    from signal import CTRL_C_EVENT as SIGKILL
+
+    def geteuid() -> int:
+        return 1
+
+    def getpgid(arg: Any) -> Any:
+        return arg
+
+    setsid = None
+
+from pyrogram import enums, filters
+from bot.client import bot
 from bot.config import Config
 
-logger = logging.getLogger(__name__)
-
-def auth_required(func):
-    """Decorator to check authorization"""
-    async def wrapper(client: Client, message: Message):
-        if not client.is_authorized(message.from_user.id, message.chat.id):
-            await message.reply_text("unauthorized access")
+def input_checker(func: Callable[[Any], Awaitable[Any]]):
+    async def wrapper(client, message) -> None:
+        if not message.text or len(message.text.split()) < 2:
+            await message.reply_text("No Command Found!")
             return
-        return await func(client, message)
+
+        cmd = " ".join(message.text.split()[1:])
+
+        if "config.env" in cmd:
+            await message.reply_text("`That's a dangerous operation! Not Permitted!`")
+            return
+        await func(client, message, cmd)
     return wrapper
 
-class Term:
-    """Live update terminal class"""
+@bot.on_message(filters.command("exec") & filters.user(Config.OWNER_ID))
+@input_checker
+async def exec_command(client, message, cmd):
+    """ run commands in exec """
+    msg = await message.reply_text("`Executing exec ...`")
     
+    try:
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        out = stdout.decode('utf-8', 'replace').strip()
+        err = stderr.decode('utf-8', 'replace').strip()
+        ret = process.returncode
+        pid = process.pid
+        
+    except Exception as t_e:
+        await msg.edit_text(f"Error: {str(t_e)}")
+        return
+
+    output = f"**EXEC**:\n\n__Command:__\n`{cmd}`\n__PID:__\n`{pid}`\n__RETURN:__\n`{ret}`\n\n**stderr:**\n`{err or 'no error'}`\n\n**stdout:**\n`{out or 'no output'}`"
+    
+    if len(output) > 4096:
+        with open("exec.txt", "w") as f:
+            f.write(output)
+        await message.reply_document("exec.txt", caption=cmd)
+        os.remove("exec.txt")
+        await msg.delete()
+    else:
+        await msg.edit_text(output, parse_mode=enums.ParseMode.MARKDOWN)
+
+_KEY = '_OLD'
+_EVAL_TASKS: Dict[asyncio.Future, str] = {}
+
+@bot.on_message(filters.command("eval") & filters.user(Config.OWNER_ID))
+async def eval_command(client, message):
+    """ run python code """
+    for t in tuple(_EVAL_TASKS):
+        if t.done():
+            del _EVAL_TASKS[t]
+
+    if not message.text or len(message.text.split()) < 2:
+        await message.reply_text("Unable to Parse Input!")
+        return
+
+    cmd = " ".join(message.text.split()[1:])
+    msg = await message.reply_text("`Executing eval ...`")
+
+    async def _callback(output: Optional[str], errored: bool):
+        final = f"**>** ```python\n{cmd}```\n\n"
+        if isinstance(output, str):
+            output = output.strip()
+            if output == '':
+                output = None
+        if output is not None:
+            final += f"**>>** ```python\n{output}```"
+        
+        if len(final) > 4096:
+            with open("eval.txt", "w") as f:
+                f.write(final)
+            await message.reply_document("eval.txt", caption=cmd)
+            await msg.delete()
+        elif final:
+            await msg.edit_text(final, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        else:
+            await msg.delete()
+
+    _g, _l = _context(_ContextType.GLOBAL, message=message)
+    l_d = {}
+    try:
+        exec(_wrap_code(cmd, _l.keys()), _g, l_d)
+    except Exception:
+        _g[_KEY] = _l
+        await _callback(traceback.format_exc(), True)
+        return
+
+    future = asyncio.get_running_loop().create_future()
+    asyncio.create_task(_run_coro_task(future, l_d['__aexec'](*_l.values()), _callback))
+    hint = cmd.split('\n')[0]
+    _EVAL_TASKS[future] = hint[:25] + "..." if len(hint) > 25 else hint
+
+    try:
+        await future
+    except asyncio.CancelledError:
+        await msg.edit_text("**EVAL Process Canceled!**")
+    finally:
+        _EVAL_TASKS.pop(future, None)
+
+@bot.on_message(filters.command("term") & filters.user(Config.OWNER_ID))
+@input_checker
+async def term_command(client, message, cmd):
+    """ run commands in shell (terminal with live update) """
+    msg = await message.reply_text("`Executing terminal ...`")
+    
+    try:
+        parsed_cmd = parse_py_template(cmd, message)
+    except Exception as e:
+        await msg.edit_text(f"Error: {str(e)}")
+        return
+    
+    try:
+        t_obj = await Term.execute(parsed_cmd)
+    except Exception as t_e:
+        await msg.edit_text(f"Error: {str(t_e)}")
+        return
+
+    cur_user = getuser()
+    uid = geteuid()
+
+    prefix = f"<b>{cur_user}:~#</b>" if uid == 0 else f"<b>{cur_user}:~$</b>"
+    output = f"{prefix} <pre>{cmd}</pre>\n"
+
+    await t_obj.init()
+    while not t_obj.finished:
+        try:
+            await msg.edit_text(f"{output}<pre>{t_obj.line}</pre>", parse_mode=enums.ParseMode.HTML)
+        except:
+            pass
+        await t_obj.wait(2)
+    
+    if t_obj.cancelled:
+        await msg.edit_text("Process Canceled!")
+        return
+
+    out_data = f"{output}<pre>{t_obj.output}</pre>\n{prefix}"
+    
+    if len(out_data) > 4096:
+        with open("term.txt", "w") as f:
+            f.write(out_data)
+        await message.reply_document("term.txt", caption=cmd)
+        await msg.delete()
+    else:
+        await msg.edit_text(out_data, parse_mode=enums.ParseMode.HTML)
+
+def parse_py_template(cmd: str, msg):
+    glo, loc = _context(_ContextType.PRIVATE, message=msg)
+
+    def replacer(mobj):
+        return shlex.quote(str(eval(mobj.expand(r"\1"), glo, loc)))
+    return re.sub(r"{{(.+?)}}", replacer, cmd)
+
+class _ContextType(Enum):
+    GLOBAL = 0
+    PRIVATE = 1
+    NEW = 2
+
+def _context(context_type: _ContextType, **kwargs) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if context_type == _ContextType.NEW:
+        try:
+            del globals()[_KEY]
+        except KeyError:
+            pass
+    if _KEY not in globals():
+        globals()[_KEY] = globals().copy()
+    _g = globals()[_KEY]
+    if context_type == _ContextType.PRIVATE:
+        _g = _g.copy()
+    _l = _g.pop(_KEY, {})
+    _l.update(kwargs)
+    return _g, _l
+
+def _wrap_code(code: str, args: Iterable[str]) -> str:
+    head = "async def __aexec(" + ', '.join(args) + "):\n try:\n  "
+    tail = "\n finally: globals()['" + _KEY + "'] = locals()"
+    if '\n' in code:
+        code = code.replace('\n', '\n  ')
+    elif (any(True for k_ in keyword.kwlist if k_ not in (
+            'True', 'False', 'None', 'lambda', 'await') and code.startswith(f"{k_} "))
+          or ('=' in code and '==' not in code)):
+        code = f"\n  {code}"
+    else:
+        code = f"\n  return {code}"
+    return head + code + tail
+
+async def _run_coro_task(future: asyncio.Future, coro: Awaitable[Any],
+                        callback: Callable[[str, bool], Awaitable[Any]]) -> None:
+    try:
+        ret, exc = None, None
+        with redirect() as out:
+            try:
+                ret = await coro
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                exc = traceback.format_exc().strip()
+            output = exc or out.getvalue()
+            if ret is not None:
+                output += str(ret)
+        await callback(output, exc is not None)
+    finally:
+        if not future.done():
+            future.set_result(None)
+
+_PROXIES = {}
+
+class _Wrapper:
+    def __init__(self, original):
+        self._original = original
+
+    def __getattr__(self, name: str):
+        return getattr(
+            _PROXIES.get(
+                threading.current_thread().ident,
+                self._original),
+            name)
+
+sys.stdout = _Wrapper(sys.stdout)
+sys.__stdout__ = _Wrapper(sys.__stdout__)
+sys.stderr = _Wrapper(sys.stderr)
+sys.__stderr__ = _Wrapper(sys.__stderr__)
+
+@contextmanager
+def redirect() -> io.StringIO:
+    ident = threading.current_thread().ident
+    source = io.StringIO()
+    _PROXIES[ident] = source
+    try:
+        yield source
+    finally:
+        del _PROXIES[ident]
+        source.close()
+
+class Term:
+    """ live update term class """
+
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self._process = process
         self._line = b''
@@ -36,100 +286,95 @@ class Term:
         self._finished = False
         self._loop = asyncio.get_running_loop()
         self._listener = self._loop.create_future()
-    
+
     @property
     def line(self) -> str:
         return self._by_to_str(self._line)
-    
+
     @property
     def output(self) -> str:
         return self._by_to_str(self._output)
-    
+
     @staticmethod
     def _by_to_str(data: bytes) -> str:
         return data.decode('utf-8', 'replace').strip()
-    
+
     @property
     def cancelled(self) -> bool:
         return self._cancelled
-    
+
     @property
     def finished(self) -> bool:
         return self._finished
-    
+
     async def init(self) -> None:
         await self._init.wait()
-    
+
     async def wait(self, timeout: int) -> None:
         self._check_listener()
         try:
             await asyncio.wait_for(self._listener, timeout)
         except asyncio.TimeoutError:
             pass
-    
+
     def _check_listener(self) -> None:
         if self._listener.done():
             self._listener = self._loop.create_future()
-    
+
     def cancel(self) -> None:
         if self._cancelled or self._finished:
             return
-        try:
-            self._process.terminate()
-        except:
-            pass
+        killpg(getpgid(self._process.pid), SIGKILL)
         self._cancelled = True
-    
+
     @classmethod
     async def execute(cls, cmd: str) -> 'Term':
-        process = await asyncio.create_subprocess_shell(
-            cmd,
+        kwargs = dict(
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+            stderr=asyncio.subprocess.PIPE)
+        if setsid:
+            kwargs['preexec_fn'] = setsid
+        if sh := which(os.environ.get("USERGE_SHELL", "bash")):
+            kwargs['executable'] = sh
+        process = await asyncio.create_subprocess_shell(cmd, **kwargs)
         t_obj = cls(process)
         t_obj._start()
         return t_obj
-    
+
     def _start(self) -> None:
         self._loop.create_task(self._worker())
-    
+
     async def _worker(self) -> None:
         if self._cancelled or self._finished:
             return
-        await asyncio.gather(
-            self._read_stdout(),
-            self._read_stderr()
-        )
+        await asyncio.wait([asyncio.create_task(self._read_stdout()), asyncio.create_task(self._read_stderr())])
         await self._process.wait()
         self._finish()
-    
+
     async def _read_stdout(self) -> None:
         await self._read(self._process.stdout)
-    
+
     async def _read_stderr(self) -> None:
         await self._read(self._process.stderr)
-    
+
     async def _read(self, reader: asyncio.StreamReader) -> None:
         while True:
             line = await reader.readline()
             if not line:
                 break
             self._append(line)
-    
+
     def _append(self, line: bytes) -> None:
         self._line = line
         self._output += line
         self._check_init()
-        if not self._listener.done():
-            self._listener.set_result(None)
-    
+
     def _check_init(self) -> None:
         if self._is_init:
             return
-        self._loop.call_later(0.1, self._init.set)
+        self._loop.call_later(1, self._init.set)
         self._is_init = True
-    
+
     def _finish(self) -> None:
         if self._finished:
             return
@@ -137,197 +382,3 @@ class Term:
         self._finished = True
         if not self._listener.done():
             self._listener.set_result(None)
-
-@Client.on_message(filters.command("term"))
-@auth_required
-async def terminal_command(client: Client, message: Message):
-    """Execute terminal command with live output"""
-    
-    if len(message.command) < 2:
-        await message.reply_text("usage: `/term <command>`")
-        return
-        
-    command = message.text.split(None, 1)[1]
-    
-    # Security check
-    dangerous_commands = ['rm -rf', 'format', 'del /f', 'shutdown', 'reboot']
-    if any(cmd in command.lower() for cmd in dangerous_commands):
-        await message.reply_text("dangerous command blocked")
-        return
-    
-    try:
-        t_obj = await Term.execute(command)
-    except Exception as e:
-        await message.reply_text(f"error: {str(e)}")
-        return
-    
-    current_user = os.environ.get('USER', 'root')
-    current_dir = os.path.basename(os.getcwd()) or 'app'
-    prefix = f"<b>{current_user}:{current_dir}#</b>" if current_user == 'root' else f"<b>{current_user}:{current_dir}$</b>"
-    output = f"{prefix} <pre>{command}</pre>\n"
-    
-    status_msg = await message.reply_text(output, parse_mode=ParseMode.HTML)
-    
-    # Live update loop
-    await t_obj.init()
-    while not t_obj.finished:
-        current_output = f"{output}<pre>{t_obj.line}</pre>"
-        try:
-            if current_output != status_msg.text:
-                await status_msg.edit_text(current_output, parse_mode=ParseMode.HTML)
-        except:
-            pass
-        await t_obj.wait(2)  # Update every 2 seconds
-    
-    if t_obj.cancelled:
-        final_output = f"{output}<pre>^C</pre>\n{prefix}"
-        await status_msg.edit_text(final_output, parse_mode=ParseMode.HTML)
-        return
-    
-    # Final output
-    final_output = f"{output}<pre>{t_obj.output}</pre>\n{prefix}"
-    
-    if len(final_output) > Config.MAX_MESSAGE_LENGTH:
-        with open("temp/terminal_output.txt", "w", encoding="utf-8") as f:
-            f.write(f"{current_user}:{current_dir}# {command}\n")
-            f.write(t_obj.output)
-            f.write(f"\n{current_user}:{current_dir}# ")
-        
-        await status_msg.delete()
-        await message.reply_document(
-            "temp/terminal_output.txt",
-            caption=f"{prefix} <pre>{command}</pre>",
-            parse_mode=ParseMode.HTML
-        )
-        os.remove("temp/terminal_output.txt")
-    else:
-        await status_msg.edit_text(final_output, parse_mode=ParseMode.HTML)
-
-@Client.on_message(filters.command("ls"))
-@auth_required  
-async def list_directory(client: Client, message: Message):
-    """List directory contents with terminal-like interface"""
-    
-    path = "."
-    if len(message.command) > 1:
-        path = message.text.split(None, 1)[1]
-    
-    # Get current user and directory info
-    current_user = os.environ.get('USER', 'root')
-    current_dir = os.path.basename(os.getcwd()) or 'app'
-    prompt = f"{current_user}:{current_dir}# "
-    
-    ls_command = f"ls {path}" if path != "." else "ls"
-    
-    try:
-        if not os.path.exists(path):
-            error_output = f"<pre>{prompt}{ls_command}\nls: cannot access '{path}': No such file or directory\n{prompt}</pre>"
-            await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-            return
-            
-        items = os.listdir(path)
-        if not items:
-            empty_output = f"<pre>{prompt}{ls_command}\n{prompt}</pre>"
-            await message.reply_text(empty_output, parse_mode=ParseMode.HTML)
-            return
-        
-        # Format output like real ls command
-        dirs = []
-        files = []
-        
-        for item in sorted(items):
-            item_path = os.path.join(path, item)
-            if os.path.isdir(item_path):
-                dirs.append(item)
-            else:
-                files.append(item)
-        
-        # Combine directories and files
-        all_items = dirs + files
-        
-        # Create terminal-like output
-        terminal_output = f"<pre>{prompt}{ls_command}\n"
-        
-        # Format items like real ls command
-        for item in all_items[:30]:  # Limit to 30 items
-            item_path = os.path.join(path, item)
-            if os.path.isdir(item_path):
-                terminal_output += f"{item}/\n"
-            else:
-                terminal_output += f"{item}\n"
-        
-        if len(all_items) > 30:
-            terminal_output += "... (output truncated)\n"
-        
-        terminal_output += f"{prompt}</pre>"
-        
-        await message.reply_text(terminal_output, parse_mode=ParseMode.HTML)
-        
-    except PermissionError:
-        error_output = f"<pre>{prompt}{ls_command}\nls: cannot open directory '{path}': Permission denied\n{prompt}</pre>"
-        await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        error_output = f"<pre>{prompt}{ls_command}\nls: {str(e)}\n{prompt}</pre>"
-        await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-
-@Client.on_message(filters.command("pwd"))
-@auth_required
-async def print_working_directory(client: Client, message: Message):
-    """Print current working directory"""
-    
-    current_user = os.environ.get('USER', 'root')
-    current_dir = os.path.basename(os.getcwd()) or 'app'
-    prompt = f"{current_user}:{current_dir}# "
-    
-    pwd_output = f"<pre>{prompt}pwd\n{os.getcwd()}\n{prompt}</pre>"
-    await message.reply_text(pwd_output, parse_mode=ParseMode.HTML)
-
-@Client.on_message(filters.command("cd"))
-@auth_required
-async def change_directory(client: Client, message: Message):
-    """Change current directory"""
-    
-    current_user = os.environ.get('USER', 'root')
-    current_dir = os.path.basename(os.getcwd()) or 'app'
-    prompt = f"{current_user}:{current_dir}# "
-    
-    if len(message.command) < 2:
-        # Go to home directory
-        target_dir = os.path.expanduser("~")
-        cd_command = "cd"
-    else:
-        target_dir = message.text.split(None, 1)[1]
-        cd_command = f"cd {target_dir}"
-    
-    try:
-        if not os.path.exists(target_dir):
-            error_output = f"<pre>{prompt}{cd_command}\nbash: cd: {target_dir}: No such file or directory\n{prompt}</pre>"
-            await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-            return
-            
-        if not os.path.isdir(target_dir):
-            error_output = f"<pre>{prompt}{cd_command}\nbash: cd: {target_dir}: Not a directory\n{prompt}</pre>"
-            await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-            return
-        
-        os.chdir(target_dir)
-        new_dir = os.path.basename(os.getcwd())
-        new_prompt = f"{current_user}:{new_dir}# "
-        
-        success_output = f"<pre>{prompt}{cd_command}\n{new_prompt}</pre>"
-        await message.reply_text(success_output, parse_mode=ParseMode.HTML)
-        
-    except PermissionError:
-        error_output = f"<pre>{prompt}{cd_command}\nbash: cd: {target_dir}: Permission denied\n{prompt}</pre>"
-        await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        error_output = f"<pre>{prompt}{cd_command}\nbash: cd: {str(e)}\n{prompt}</pre>"
-        await message.reply_text(error_output, parse_mode=ParseMode.HTML)
-
-def format_bytes(bytes_size):
-    """Format bytes to human readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes_size < 1024.0:
-            return f"{bytes_size:.1f} {unit}"
-        bytes_size /= 1024.0
-    return f"{bytes_size:.1f} TB"
