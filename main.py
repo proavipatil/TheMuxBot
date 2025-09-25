@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from pyrogram import Client
-from pyrogram.errors import ApiIdInvalid, BotTokenInvalid
+from pyrogram.errors import RPCError
 
 from config import Config, BOT_TOKEN, API_ID, API_HASH, WORKERS, AUTHORIZED_USERS, AUTHORIZED_GROUPS
 from database import db
@@ -54,11 +54,13 @@ class TheBot(Client):
             logger.info(f"Authorized users: {len(AUTHORIZED_USERS)}")
             logger.info(f"Authorized groups: {len(AUTHORIZED_GROUPS)}")
             
-        except ApiIdInvalid:
-            logger.error("Invalid API_ID or API_HASH")
-            raise
-        except BotTokenInvalid:
-            logger.error("Invalid BOT_TOKEN")
+        except RPCError as e:
+            if "API_ID" in str(e) or "API_HASH" in str(e):
+                logger.error("Invalid API_ID or API_HASH")
+            elif "BOT_TOKEN" in str(e) or "token" in str(e).lower():
+                logger.error("Invalid BOT_TOKEN")
+            else:
+                logger.error(f"Pyrogram error: {e}")
             raise
         except Exception as e:
             logger.error(f"Failed to start bot: {e}")
