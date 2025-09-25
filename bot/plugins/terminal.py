@@ -442,10 +442,9 @@ async def term_(message):
         return
 
     cur_user = getuser()
-    uid = geteuid()
     current_dir_name = basename(CURRENT_DIR) or CURRENT_DIR
 
-    prefix = f"<b>{cur_user}:{current_dir_name}#</b>" if uid == 0 else f"<b>{cur_user}:{current_dir_name}$</b>"
+    prefix = f"<b>{cur_user}:{current_dir_name}#</b>"
     output = f"{prefix} <pre>{cmd}</pre>\n"
     
     # Track if we've made the first edit to avoid duplicate messages
