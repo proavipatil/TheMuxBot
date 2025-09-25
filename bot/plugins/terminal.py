@@ -31,26 +31,19 @@ except ImportError:
     setsid = None
 
 from pyrogram import enums, filters
-from bot.client import bot
 from bot.config import Config
 
-def input_checker(func: Callable[[Any], Awaitable[Any]]):
-    async def wrapper(client, message) -> None:
-        if not message.text or len(message.text.split()) < 2:
-            await message.reply_text("No Command Found!")
-            return
+async def exec_command(client, message):
+    """ run commands in exec """
+    if not message.text or len(message.text.split()) < 2:
+        await message.reply_text("No Command Found!")
+        return
 
-        cmd = " ".join(message.text.split()[1:])
+    cmd = " ".join(message.text.split()[1:])
 
-        if "config.env" in cmd:
-            await message.reply_text("`That's a dangerous operation! Not Permitted!`")
-            return
-        await func(client, message, cmd)
-    return wrapper
-
-@bot.on_message(filters.command("exec") & filters.user(Config.OWNER_ID))
-@input_checker
-async def exec_command(client, message, cmd):
+    if "config.env" in cmd:
+        await message.reply_text("`That's a dangerous operation! Not Permitted!`")
+        return
     """ run commands in exec """
     msg = await message.reply_text("`Executing exec ...`")
     
@@ -85,7 +78,6 @@ async def exec_command(client, message, cmd):
 _KEY = '_OLD'
 _EVAL_TASKS: Dict[asyncio.Future, str] = {}
 
-@bot.on_message(filters.command("eval") & filters.user(Config.OWNER_ID))
 async def eval_command(client, message):
     """ run python code """
     for t in tuple(_EVAL_TASKS):
@@ -139,9 +131,17 @@ async def eval_command(client, message):
     finally:
         _EVAL_TASKS.pop(future, None)
 
-@bot.on_message(filters.command("term") & filters.user(Config.OWNER_ID))
-@input_checker
-async def term_command(client, message, cmd):
+async def term_command(client, message):
+    """ run commands in shell (terminal with live update) """
+    if not message.text or len(message.text.split()) < 2:
+        await message.reply_text("No Command Found!")
+        return
+
+    cmd = " ".join(message.text.split()[1:])
+
+    if "config.env" in cmd:
+        await message.reply_text("`That's a dangerous operation! Not Permitted!`")
+        return
     """ run commands in shell (terminal with live update) """
     msg = await message.reply_text("`Executing terminal ...`")
     
