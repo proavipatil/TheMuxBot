@@ -9,7 +9,7 @@ import logging
 import sys
 from pathlib import Path
 
-from bot import MuxBot
+from bot.client import MuxBot
 from bot.config import Config
 
 # Setup logging
